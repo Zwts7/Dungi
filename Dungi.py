@@ -26,8 +26,11 @@ SPIDER_MAX_HEALTH = 16
 SPIDER_ATTACK_DAMAGE = 2
 SPIDER_ATTACK_RANGE = 4
 SPIDER_ATTACK_COOLDOWN_MS = 1000
+DAMAGE_PARTICLE_COUNT = 8
+DAMAGE_PARTICLE_LIFETIME = 0.35
 AMOUNT_OF_SPIDERS = random.randint(5, 10)
 MOBS = []
+PARTICLES = []
 
 SPIDER_IMAGE = pygame.image.load("Dungi/Spider.png")
 
@@ -63,6 +66,46 @@ player_health = PLAYER_MAX_HEALTH
 player_stamina = PLAYER_MAX_STAMINA
 last_sprint_time = pygame.time.get_ticks()
 last_player_attack = -PLAYER_ATTACK_COOLDOWN_MS
+
+
+def spawn_damage_particles(position, color):
+    for _ in range(DAMAGE_PARTICLE_COUNT):
+        direction = pygame.Vector2(
+            random.uniform(-1, 1),
+            random.uniform(-1, 1),
+        )
+        if direction.length_squared() == 0:
+            direction.x = 1
+        direction.normalize_ip()
+        PARTICLES.append({
+            "position": pygame.Vector2(position),
+            "velocity": direction * random.uniform(45, 120),
+            "color": color,
+            "lifetime": DAMAGE_PARTICLE_LIFETIME,
+        })
+
+
+def update_damage_particles(delta_seconds):
+    for particle in PARTICLES:
+        particle["position"] += particle["velocity"] * delta_seconds
+        particle["lifetime"] -= delta_seconds
+    PARTICLES[:] = [
+        particle for particle in PARTICLES
+        if particle["lifetime"] > 0
+    ]
+
+
+def draw_damage_particles():
+    for particle in PARTICLES:
+        progress = particle["lifetime"] / DAMAGE_PARTICLE_LIFETIME
+        radius = max(1, round(4 * progress))
+        pygame.draw.circle(
+            screen,
+            particle["color"],
+            (round(particle["position"].x), round(particle["position"].y)),
+            radius,
+        )
+
 
 def spawn_spider():
     while True:
@@ -227,6 +270,7 @@ def attack_nearby_spider(now):
 
         spider["health"] -= PLAYER_ATTACK_DAMAGE
         spider["knockback_velocity"] = knockback
+        spawn_damage_particles(spider_rect.center, (255, 210, 70))
     player_stamina -= PLAYER_ATTACK_STAMINA_COST
     last_player_attack = now
 
@@ -258,6 +302,7 @@ def attack_player_from_spiders(now):
             and now >= spider["next_attack_time"]
         ):
             player_health = max(0, player_health - SPIDER_ATTACK_DAMAGE)
+            spawn_damage_particles(player_rect.center, (255, 70, 70))
             spider["next_attack_time"] = now + SPIDER_ATTACK_COOLDOWN_MS
 
 
@@ -285,6 +330,8 @@ while running:
         attack_player_from_spiders(now)
         MOBS = [spider for spider in MOBS if spider["health"] > 0]
 
+    update_damage_particles(delta_seconds)
+
     for y in range(0, HEIGHT, BACKGROUND_TILE.get_height()):
         for x in range(0, WIDTH, BACKGROUND_TILE.get_width()):
             screen.blit(BACKGROUND_TILE, (x, y))
@@ -306,6 +353,9 @@ while running:
             )
         
     screen.blit(PLAYER_IMAGE, player_rect)
+    if DEBUG:
+        pygame.draw.rect(screen, (80, 255, 255), player_rect, 1)
+
     health_text = font.render(
         f"Health: {player_health}/{PLAYER_MAX_HEALTH}", True, "white"
     )
@@ -331,6 +381,8 @@ while running:
             0, int(30 * spider["health"] / SPIDER_MAX_HEALTH)
         )
         pygame.draw.rect(screen, "limegreen", health_bar)
+
+    draw_damage_particles()
 
     if player_health == 0:
         screen.fill("black")
