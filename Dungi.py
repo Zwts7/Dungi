@@ -109,7 +109,7 @@ def draw_damage_particles():
 
 
 def spawn_spider():
-    while True:
+    for _ in range(1000):
         spider_rect = pygame.Rect(
             random.randint(
                 GAME_MAP.playable_rect.left,
@@ -122,10 +122,20 @@ def spawn_spider():
             30,
             30,
         )
-        if not spider_rect.colliderect(player_rect) and all(
-            not spider_rect.colliderect(spider["rect"]) for spider in MOBS
+        if (
+            GAME_MAP.is_walkable(spider_rect)
+            and not spider_rect.colliderect(player_rect)
+            and all(
+                not spider_rect.colliderect(spider["rect"])
+                for spider in MOBS
+            )
         ):
             break
+    else:
+        raise RuntimeError(
+            "Could not find an unoccupied cave floor tile for a spider"
+        )
+
     MOBS.append({
         "rect": spider_rect,
         "image": SPIDER_IMAGE,
