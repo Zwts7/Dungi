@@ -1,6 +1,7 @@
 import pygame
 import random
 import math
+from Map_creator import create_map
 
 pygame.init()
 
@@ -37,7 +38,7 @@ SPIDER_IMAGE = pygame.image.load("Dungi/Spider.png")
 screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
 pygame.display.set_caption("Dungi")
 
-BACKGROUND_TILE = pygame.image.load("Dungi/Tiles/tile.png").convert()
+GAME_MAP = create_map((WIDTH, HEIGHT))
 
 clock = pygame.time.Clock()
 font = pygame.font.Font(None, 28)
@@ -109,7 +110,18 @@ def draw_damage_particles():
 
 def spawn_spider():
     while True:
-        spider_rect = pygame.Rect(random.randint(0, WIDTH - 30), random.randint(0, HEIGHT - 30), 30, 30)
+        spider_rect = pygame.Rect(
+            random.randint(
+                GAME_MAP.playable_rect.left,
+                GAME_MAP.playable_rect.right - 30,
+            ),
+            random.randint(
+                GAME_MAP.playable_rect.top,
+                GAME_MAP.playable_rect.bottom - 30,
+            ),
+            30,
+            30,
+        )
         if not spider_rect.colliderect(player_rect) and all(
             not spider_rect.colliderect(spider["rect"]) for spider in MOBS
         ):
@@ -157,7 +169,7 @@ def movement(delta_seconds):
         player_rect,
         horizontal,
         vertical,
-        [spider["rect"] for spider in MOBS],
+        [spider["rect"] for spider in MOBS] + GAME_MAP.wall_rects,
     )
         
     if keys[pygame.K_ESCAPE]:
@@ -212,7 +224,7 @@ def move_spider(spider, player_rect):
     spider_rect = spider["rect"]
     blockers = [player_rect] + [
         other_spider["rect"] for other_spider in MOBS if other_spider is not spider
-    ]
+    ] + GAME_MAP.wall_rects
 
     knockback_velocity = spider["knockback_velocity"]
     if knockback_velocity.length_squared() > 0.25:
@@ -332,9 +344,7 @@ while running:
 
     update_damage_particles(delta_seconds)
 
-    for y in range(0, HEIGHT, BACKGROUND_TILE.get_height()):
-        for x in range(0, WIDTH, BACKGROUND_TILE.get_width()):
-            screen.blit(BACKGROUND_TILE, (x, y))
+    GAME_MAP.draw(screen)
 
     if DEBUG:
         screen.blit(
