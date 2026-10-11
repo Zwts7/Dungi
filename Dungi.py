@@ -1,0 +1,345 @@
+import pygame
+import random
+import math
+
+pygame.init()
+
+info = pygame.display.Info()
+WIDTH, HEIGHT = info.current_w, info.current_h
+FPS = 60
+DEBUG = True
+PLAYER_SPEED = 3
+PLAYER_SPRINT_SPEED = 5
+PLAYER_MAX_STAMINA = 100
+PLAYER_SPRINT_STAMINA_DRAIN = 25
+PLAYER_STAMINA_REGEN_DELAY_MS = 1000
+PLAYER_ATTACK_STAMINA_COST = 20
+PLAYER_WALK_STAMINA_REGEN = 15
+PLAYER_IDLE_STAMINA_REGEN = 30
+PLAYER_MAX_HEALTH = 20
+PLAYER_ATTACK_DAMAGE = 6
+PLAYER_ATTACK_RANGE = 40
+PLAYER_ATTACK_KNOCKBACK_SPEED = 12
+KNOCKBACK_FRICTION = 0.82
+PLAYER_ATTACK_COOLDOWN_MS = 400
+SPIDER_MAX_HEALTH = 16
+SPIDER_ATTACK_DAMAGE = 2
+SPIDER_ATTACK_RANGE = 4
+SPIDER_ATTACK_COOLDOWN_MS = 1000
+AMOUNT_OF_SPIDERS = random.randint(5, 10)
+MOBS = []
+
+SPIDER_IMAGE = pygame.image.load("Dungi/Spider.png")
+
+screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
+pygame.display.set_caption("Dungi")
+
+BACKGROUND_TILE = pygame.image.load("Dungi/Tiles/tile.png").convert()
+
+clock = pygame.time.Clock()
+font = pygame.font.Font(None, 28)
+attack_range_indicator = pygame.Surface(
+    (PLAYER_ATTACK_RANGE * 2, PLAYER_ATTACK_RANGE * 2),
+    pygame.SRCALPHA,
+)
+pygame.draw.circle(
+    attack_range_indicator,
+    (255, 220, 0, 45),
+    (PLAYER_ATTACK_RANGE, PLAYER_ATTACK_RANGE),
+    PLAYER_ATTACK_RANGE,
+)
+pygame.draw.circle(
+    attack_range_indicator,
+    (255, 220, 0, 160),
+    (PLAYER_ATTACK_RANGE, PLAYER_ATTACK_RANGE),
+    PLAYER_ATTACK_RANGE,
+    2,
+)
+
+player_rect = pygame.Rect(WIDTH // 2, HEIGHT // 2, 24, 40)
+PLAYER_IMAGE = pygame.image.load("Dungi/Player.png").convert_alpha()
+PLAYER_IMAGE = pygame.transform.smoothscale(PLAYER_IMAGE, (player_rect.width, player_rect.height))
+player_health = PLAYER_MAX_HEALTH
+player_stamina = PLAYER_MAX_STAMINA
+last_sprint_time = pygame.time.get_ticks()
+last_player_attack = -PLAYER_ATTACK_COOLDOWN_MS
+
+def spawn_spider():
+    while True:
+        spider_rect = pygame.Rect(random.randint(0, WIDTH - 30), random.randint(0, HEIGHT - 30), 30, 30)
+        if not spider_rect.colliderect(player_rect) and all(
+            not spider_rect.colliderect(spider["rect"]) for spider in MOBS
+        ):
+            break
+    MOBS.append({
+        "rect": spider_rect,
+        "image": SPIDER_IMAGE,
+        "speed": random.randint(1, 3),
+        "health": SPIDER_MAX_HEALTH,
+        "next_attack_time": pygame.time.get_ticks() + SPIDER_ATTACK_COOLDOWN_MS,
+        "knockback_velocity": pygame.Vector2(),
+    })
+
+
+for _ in range(AMOUNT_OF_SPIDERS):
+    spawn_spider()
+
+
+
+def movement(delta_seconds):
+    keys = pygame.key.get_pressed()
+    horizontal_input = (
+        int(keys[pygame.K_d] or keys[pygame.K_RIGHT])
+        - int(keys[pygame.K_a] or keys[pygame.K_LEFT])
+    )
+    vertical_input = (
+        int(keys[pygame.K_s] or keys[pygame.K_DOWN])
+        - int(keys[pygame.K_w] or keys[pygame.K_UP])
+    )
+    is_moving = horizontal_input != 0 or vertical_input != 0
+    is_sprinting = (
+        is_moving
+        and (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
+        and player_stamina > PLAYER_SPRINT_STAMINA_DRAIN * delta_seconds
+    )
+    speed = PLAYER_SPRINT_SPEED if is_sprinting else PLAYER_SPEED
+    horizontal = (
+        horizontal_input * speed
+    )
+    vertical = (
+        vertical_input * speed
+    )
+
+    move_without_collision(
+        player_rect,
+        horizontal,
+        vertical,
+        [spider["rect"] for spider in MOBS],
+    )
+        
+    if keys[pygame.K_ESCAPE]:
+        pygame.quit()
+        exit()
+
+    return is_moving, is_sprinting
+
+
+def update_stamina(delta_seconds, is_moving, is_sprinting, now):
+    global player_stamina, last_sprint_time
+    keys = pygame.key.get_pressed()
+    shift_held = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+
+    if is_sprinting:
+        last_sprint_time = now
+        player_stamina = max(
+            0,
+            player_stamina - PLAYER_SPRINT_STAMINA_DRAIN * delta_seconds,
+        )
+    elif (
+        not shift_held
+        and now - last_sprint_time >= PLAYER_STAMINA_REGEN_DELAY_MS
+    ):
+        regeneration = (
+            PLAYER_WALK_STAMINA_REGEN
+            if is_moving
+            else PLAYER_IDLE_STAMINA_REGEN
+        )
+        player_stamina = min(
+            PLAYER_MAX_STAMINA,
+            player_stamina + regeneration * delta_seconds,
+        )
+
+
+def move_without_collision(rect, horizontal, vertical, blockers):
+    rect.x += horizontal
+    if any(rect.colliderect(blocker) for blocker in blockers):
+        rect.x -= horizontal
+
+    rect.y += vertical
+    if any(rect.colliderect(blocker) for blocker in blockers):
+        rect.y -= vertical
+
+
+def spawning_spiders():
+    for spider in MOBS:
+        move_spider(spider, player_rect)
+    
+    
+def move_spider(spider, player_rect):
+    spider_rect = spider["rect"]
+    blockers = [player_rect] + [
+        other_spider["rect"] for other_spider in MOBS if other_spider is not spider
+    ]
+
+    knockback_velocity = spider["knockback_velocity"]
+    if knockback_velocity.length_squared() > 0.25:
+        move_without_collision(
+            spider_rect,
+            round(knockback_velocity.x),
+            round(knockback_velocity.y),
+            blockers,
+        )
+        knockback_velocity *= KNOCKBACK_FRICTION
+        if knockback_velocity.length_squared() <= 0.25:
+            spider["knockback_velocity"] = pygame.Vector2()
+        return
+
+    spider["knockback_velocity"] = pygame.Vector2()
+    horizontal = 0
+    if spider_rect.x < player_rect.x:
+        horizontal = spider["speed"]
+        spider["image"] = pygame.transform.flip(SPIDER_IMAGE, True, False)
+    elif spider_rect.x > player_rect.x:
+        horizontal = -spider["speed"]
+        spider["image"] = SPIDER_IMAGE
+
+    vertical = 0
+    if spider_rect.y < player_rect.y:
+        vertical = spider["speed"]
+    elif spider_rect.y > player_rect.y:
+        vertical = -spider["speed"]
+
+    move_without_collision(spider_rect, horizontal, vertical, blockers)
+
+
+def attack_nearby_spider(now):
+    global last_player_attack, player_stamina
+
+    if now - last_player_attack < PLAYER_ATTACK_COOLDOWN_MS:
+        return
+
+    nearby_spiders = [
+        spider for spider in MOBS
+        if player_attack_reaches_spider(spider)
+    ]
+    if not nearby_spiders:
+        return
+    if player_stamina < PLAYER_ATTACK_STAMINA_COST:
+        return
+
+    player_center = pygame.Vector2(player_rect.center)
+    for spider in nearby_spiders:
+        spider_rect = spider["rect"]
+        knockback = pygame.Vector2(spider_rect.center) - player_center
+        if knockback.length_squared() == 0:
+            knockback = pygame.Vector2(1, 0)
+        knockback.scale_to_length(PLAYER_ATTACK_KNOCKBACK_SPEED)
+
+        spider["health"] -= PLAYER_ATTACK_DAMAGE
+        spider["knockback_velocity"] = knockback
+    player_stamina -= PLAYER_ATTACK_STAMINA_COST
+    last_player_attack = now
+
+
+def spider_attack_area(spider):
+    return spider["rect"].inflate(
+        SPIDER_ATTACK_RANGE * 2,
+        SPIDER_ATTACK_RANGE * 2,
+    )
+
+
+def player_attack_reaches_spider(spider):
+    spider_area = spider_attack_area(spider)
+    closest_x = max(spider_area.left, min(player_rect.centerx, spider_area.right))
+    closest_y = max(spider_area.top, min(player_rect.centery, spider_area.bottom))
+    offset_x = player_rect.centerx - closest_x
+    offset_y = player_rect.centery - closest_y
+    return offset_x**2 + offset_y**2 <= PLAYER_ATTACK_RANGE**2
+
+
+def attack_player_from_spiders(now):
+    global player_health
+
+    for spider in MOBS:
+        if (
+            pygame.Rect(spider["rect"]).inflate(
+                SPIDER_ATTACK_RANGE * 2, SPIDER_ATTACK_RANGE * 2
+            ).colliderect(player_rect)
+            and now >= spider["next_attack_time"]
+        ):
+            player_health = max(0, player_health - SPIDER_ATTACK_DAMAGE)
+            spider["next_attack_time"] = now + SPIDER_ATTACK_COOLDOWN_MS
+
+
+
+running = True
+while running:
+    delta_seconds = clock.tick(FPS) / 1000
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        elif DEBUG and event.type == pygame.KEYDOWN and event.key == pygame.K_EQUALS:
+            spawn_spider()
+        elif (
+            player_health > 0
+            and event.type == pygame.KEYDOWN
+            and event.key == pygame.K_SPACE
+        ):
+            attack_nearby_spider(pygame.time.get_ticks())
+
+    now = pygame.time.get_ticks()
+    if player_health > 0:
+        is_moving, is_sprinting = movement(delta_seconds)
+        update_stamina(delta_seconds, is_moving, is_sprinting, now)
+        spawning_spiders()
+        attack_player_from_spiders(now)
+        MOBS = [spider for spider in MOBS if spider["health"] > 0]
+
+    for y in range(0, HEIGHT, BACKGROUND_TILE.get_height()):
+        for x in range(0, WIDTH, BACKGROUND_TILE.get_width()):
+            screen.blit(BACKGROUND_TILE, (x, y))
+
+    if DEBUG:
+        screen.blit(
+            attack_range_indicator,
+            (
+                player_rect.centerx - PLAYER_ATTACK_RANGE,
+                player_rect.centery - PLAYER_ATTACK_RANGE,
+            ),
+        )
+        for spider in MOBS:
+            pygame.draw.rect(
+                screen,
+                (255, 80, 80),
+                spider_attack_area(spider),
+                1,
+            )
+        
+    screen.blit(PLAYER_IMAGE, player_rect)
+    health_text = font.render(
+        f"Health: {player_health}/{PLAYER_MAX_HEALTH}", True, "white"
+    )
+    screen.blit(health_text, (10, 10))
+    stamina_label = font.render("Stamina", True, "white")
+    screen.blit(stamina_label, (10, 38))
+    stamina_bar = pygame.Rect(10, 65, 200, 12)
+    pygame.draw.rect(screen, "darkgray", stamina_bar)
+    stamina_bar.width = math.ceil(
+        200 * player_stamina / PLAYER_MAX_STAMINA
+    )
+    pygame.draw.rect(screen, "cyan", stamina_bar)
+    stamina_text = font.render(
+        f"{math.ceil(player_stamina)}/{PLAYER_MAX_STAMINA}", True, "white"
+    )
+    screen.blit(stamina_text, (220, 58))
+    
+    for spider in MOBS:
+        screen.blit(spider["image"], spider["rect"])
+        health_bar = pygame.Rect(spider["rect"].x, spider["rect"].y - 8, 30, 5)
+        pygame.draw.rect(screen, "darkred", health_bar)
+        health_bar.width = max(
+            0, int(30 * spider["health"] / SPIDER_MAX_HEALTH)
+        )
+        pygame.draw.rect(screen, "limegreen", health_bar)
+
+    if player_health == 0:
+        screen.fill("black")
+        game_over_text = font.render("GAME OVER", True, "red")
+        screen.blit(game_over_text, game_over_text.get_rect(center=screen.get_rect().center))
+
+    pygame.display.flip()
+
+
+
+
+pygame.quit()
