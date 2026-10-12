@@ -1,6 +1,7 @@
 import pygame
 import random
 import math
+from collections import deque
 from Map_creator import create_map
 
 pygame.init()
@@ -8,7 +9,7 @@ pygame.init()
 info = pygame.display.Info()
 WIDTH, HEIGHT = info.current_w, info.current_h
 FPS = 60
-DEBUG = True
+DEBUG = True  # remember to set DEBUG to False before final submission
 PLAYER_SPEED = 3
 PLAYER_SPRINT_SPEED = 5
 PLAYER_MAX_STAMINA = 100
@@ -20,11 +21,13 @@ PLAYER_IDLE_STAMINA_REGEN = 30
 PLAYER_MAX_HEALTH = 20
 PLAYER_ATTACK_DAMAGE = 6
 PLAYER_ATTACK_RANGE = 40
+PLAYER_SWORD_SWING_DURATION_MS = 220
+PLAYER_SWORD_SWING_ARC_DEGREES = 120
 PLAYER_ATTACK_KNOCKBACK_SPEED = 12
 KNOCKBACK_FRICTION = 0.82
 PLAYER_ATTACK_COOLDOWN_MS = 400
 SPIDER_MAX_HEALTH = 16
-SPIDER_ATTACK_DAMAGE = 2
+SPIDER_ATTACK_DAMAGE = 1
 SPIDER_ATTACK_RANGE = 4
 SPIDER_ATTACK_COOLDOWN_MS = 1000
 DAMAGE_PARTICLE_COUNT = 8
@@ -65,6 +68,9 @@ PLAYER_IMAGE = pygame.image.load("Dungi/Player.png").convert_alpha()
 PLAYER_IMAGE = pygame.transform.smoothscale(PLAYER_IMAGE, (player_rect.width, player_rect.height))
 player_health = PLAYER_MAX_HEALTH
 player_stamina = PLAYER_MAX_STAMINA
+player_facing = pygame.Vector2(1, 0)
+last_sword_swing = -PLAYER_SWORD_SWING_DURATION_MS
+last_sword_swing_facing = pygame.Vector2(player_facing)
 last_sprint_time = pygame.time.get_ticks()
 last_player_attack = -PLAYER_ATTACK_COOLDOWN_MS
 
@@ -139,10 +145,12 @@ def spawn_spider():
     MOBS.append({
         "rect": spider_rect,
         "image": SPIDER_IMAGE,
-        "speed": random.randint(1, 3),
+        "speed": random.randint(2, 4),
         "health": SPIDER_MAX_HEALTH,
         "next_attack_time": pygame.time.get_ticks() + SPIDER_ATTACK_COOLDOWN_MS,
         "knockback_velocity": pygame.Vector2(),
+        "is_chasing": False,
+        "last_known_player_position": None,
     })
 
 
@@ -152,6 +160,7 @@ for _ in range(AMOUNT_OF_SPIDERS):
 
 
 def movement(delta_seconds):
+    global player_facing
     keys = pygame.key.get_pressed()
     horizontal_input = (
         int(keys[pygame.K_d] or keys[pygame.K_RIGHT])
@@ -162,6 +171,8 @@ def movement(delta_seconds):
         - int(keys[pygame.K_w] or keys[pygame.K_UP])
     )
     is_moving = horizontal_input != 0 or vertical_input != 0
+    if is_moving:
+        player_facing = pygame.Vector2(horizontal_input, vertical_input).normalize()
     is_sprinting = (
         is_moving
         and (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
@@ -230,6 +241,85 @@ def spawning_spiders():
         move_spider(spider, player_rect)
     
     
+def spider_can_see_player(spider_rect, target_rect):
+    start = spider_rect.center
+    end = target_rect.center
+    return not any(
+        wall.clipline(start, end)
+        for wall in GAME_MAP.wall_rects
+    )
+
+
+def find_spider_path(spider_rect, destination, other_spiders):
+    tile_width, tile_height = GAME_MAP.tile_size
+    start = (
+        spider_rect.centerx // tile_width,
+        spider_rect.centery // tile_height,
+    )
+    floor_cells = GAME_MAP.floor_cells
+    if start not in floor_cells:
+        return []
+
+    pending = deque([start])
+    previous: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
+    goal = None
+    while pending:
+        cell = pending.popleft()
+        column, row = cell
+        center = (
+            column * tile_width + tile_width // 2,
+            row * tile_height + tile_height // 2,
+        )
+        if (
+            pygame.Vector2(center).distance_to(destination)
+            <= max(tile_width, tile_height) * 1.5
+            and (
+                goal is None
+                or pygame.Vector2(center).distance_squared_to(destination)
+                < pygame.Vector2(
+                    goal[0] * tile_width + tile_width // 2,
+                    goal[1] * tile_height + tile_height // 2,
+                ).distance_squared_to(destination)
+            )
+        ):
+            goal = cell
+
+        for neighbor in (
+            (column + 1, row),
+            (column - 1, row),
+            (column, row + 1),
+            (column, row - 1),
+        ):
+            if neighbor in previous or neighbor not in floor_cells:
+                continue
+
+            center = (
+                neighbor[0] * tile_width + tile_width // 2,
+                neighbor[1] * tile_height + tile_height // 2,
+            )
+            waypoint = pygame.Rect((0, 0), spider_rect.size)
+            waypoint.center = center
+            if (
+                not GAME_MAP.is_walkable(waypoint)
+                or any(waypoint.colliderect(other) for other in other_spiders)
+            ):
+                continue
+
+            previous[neighbor] = cell
+            pending.append(neighbor)
+
+    if goal is None:
+        return []
+
+    path = []
+    cell = goal
+    while cell is not None:
+        path.append(cell)
+        cell = previous[cell]
+    path.reverse()
+    return path
+
+
 def move_spider(spider, player_rect):
     spider_rect = spider["rect"]
     blockers = [player_rect] + [
@@ -250,21 +340,51 @@ def move_spider(spider, player_rect):
         return
 
     spider["knockback_velocity"] = pygame.Vector2()
-    horizontal = 0
-    if spider_rect.x < player_rect.x:
-        horizontal = spider["speed"]
+    if spider_can_see_player(spider_rect, player_rect):
+        spider["is_chasing"] = True
+        spider["last_known_player_position"] = player_rect.center
+    elif not spider["is_chasing"]:
+        return
+
+    target = spider["last_known_player_position"]
+    other_spiders = [
+        other_spider["rect"]
+        for other_spider in MOBS
+        if other_spider is not spider
+    ]
+    path = find_spider_path(spider_rect, target, other_spiders)
+    if not path:
+        return
+
+    tile_width, tile_height = GAME_MAP.tile_size
+    if len(path) > 1:
+        next_cell = path[1]
+        target_x = next_cell[0] * tile_width + tile_width // 2
+        target_y = next_cell[1] * tile_height + tile_height // 2
+    else:
+        target_x, target_y = target
+
+    horizontal = max(
+        -spider["speed"],
+        min(spider["speed"], target_x - spider_rect.centerx),
+    )
+    vertical = max(
+        -spider["speed"],
+        min(spider["speed"], target_y - spider_rect.centery),
+    )
+    if horizontal > 0:
         spider["image"] = pygame.transform.flip(SPIDER_IMAGE, True, False)
-    elif spider_rect.x > player_rect.x:
-        horizontal = -spider["speed"]
+    elif horizontal < 0:
         spider["image"] = SPIDER_IMAGE
 
-    vertical = 0
-    if spider_rect.y < player_rect.y:
-        vertical = spider["speed"]
-    elif spider_rect.y > player_rect.y:
-        vertical = -spider["speed"]
-
     move_without_collision(spider_rect, horizontal, vertical, blockers)
+    if (
+        not spider_can_see_player(spider_rect, player_rect)
+        and pygame.Vector2(spider_rect.center).distance_to(target)
+        <= max(tile_width, tile_height)
+    ):
+        spider["is_chasing"] = False
+        spider["last_known_player_position"] = None
 
 
 def attack_nearby_spider(now):
@@ -328,6 +448,85 @@ def attack_player_from_spiders(now):
             spider["next_attack_time"] = now + SPIDER_ATTACK_COOLDOWN_MS
 
 
+def draw_sword_swing(now):
+    elapsed = now - last_sword_swing
+    if not 0 <= elapsed < PLAYER_SWORD_SWING_DURATION_MS:
+        return
+
+    progress = elapsed / PLAYER_SWORD_SWING_DURATION_MS
+    center = pygame.Vector2(
+        PLAYER_ATTACK_RANGE + 8,
+        PLAYER_ATTACK_RANGE + 8,
+    )
+    facing_angle = math.atan2(
+        last_sword_swing_facing.y,
+        last_sword_swing_facing.x,
+    )
+    half_arc = math.radians(PLAYER_SWORD_SWING_ARC_DEGREES / 2)
+    start_angle = facing_angle - half_arc
+    current_angle = start_angle + progress * half_arc * 2
+    swing_surface = pygame.Surface(
+        (PLAYER_ATTACK_RANGE * 2 + 16, PLAYER_ATTACK_RANGE * 2 + 16),
+        pygame.SRCALPHA,
+    )
+
+    trail_start = max(start_angle, current_angle - math.radians(45))
+    trail_points = [
+        (
+            round(center.x + math.cos(angle) * PLAYER_ATTACK_RANGE),
+            round(center.y + math.sin(angle) * PLAYER_ATTACK_RANGE),
+        )
+        for angle in (
+            trail_start + (current_angle - trail_start) * step / 8
+            for step in range(9)
+        )
+    ]
+    if len(trail_points) > 1:
+        pygame.draw.lines(swing_surface, (205, 225, 245, 150), False, trail_points, 3)
+
+    direction = pygame.Vector2(math.cos(current_angle), math.sin(current_angle))
+    blade_start = center + direction * 10
+    blade_end = center + direction * PLAYER_ATTACK_RANGE
+    pygame.draw.line(
+        swing_surface,
+        (75, 85, 100, 230),
+        blade_start,
+        blade_end,
+        7,
+    )
+    pygame.draw.line(
+        swing_surface,
+        (220, 230, 240, 255),
+        blade_start,
+        blade_end,
+        4,
+    )
+    guard_center = center + direction * 10
+    guard_direction = pygame.Vector2(-direction.y, direction.x) * 6
+    pygame.draw.line(
+        swing_surface,
+        (150, 160, 175, 255),
+        guard_center - guard_direction,
+        guard_center + guard_direction,
+        3,
+    )
+    handle_end = center - direction * 5
+    pygame.draw.line(
+        swing_surface,
+        (100, 65, 40, 255),
+        guard_center,
+        handle_end,
+        4,
+    )
+    screen.blit(
+        swing_surface,
+        (
+            player_rect.centerx - round(center.x),
+            player_rect.centery - round(center.y),
+        ),
+    )
+
+
 
 running = True
 while running:
@@ -342,7 +541,11 @@ while running:
             and event.type == pygame.KEYDOWN
             and event.key == pygame.K_SPACE
         ):
-            attack_nearby_spider(pygame.time.get_ticks())
+            now = pygame.time.get_ticks()
+            if now - last_sword_swing >= PLAYER_ATTACK_COOLDOWN_MS:
+                last_sword_swing = now
+                last_sword_swing_facing = pygame.Vector2(player_facing)
+            attack_nearby_spider(now)
 
     now = pygame.time.get_ticks()
     if player_health > 0:
@@ -373,6 +576,7 @@ while running:
             )
         
     screen.blit(PLAYER_IMAGE, player_rect)
+    draw_sword_swing(pygame.time.get_ticks())
     if DEBUG:
         pygame.draw.rect(screen, (80, 255, 255), player_rect, 1)
 
