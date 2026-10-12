@@ -7,12 +7,14 @@ from Map_creator import create_map
 
 pygame.init()
 
+ASSET_DIRECTORY = Path(__file__).resolve().parent / "assets"
+
 info = pygame.display.Info()
 WIDTH, HEIGHT = info.current_w, info.current_h
 FPS = 60
 DEBUG = False  # remember to set DEBUG to False before final submission
 PLAYER_SPEED = 3
-PLAYER_SPRINT_SPEED = 5
+PLAYER_SPRINT_SPEED = 4
 PLAYER_MAX_STAMINA = 100
 PLAYER_SPRINT_STAMINA_DRAIN = 25
 PLAYER_STAMINA_REGEN_DELAY_MS = 1000
@@ -25,7 +27,7 @@ PLAYER_DEATH_FADE_MS = 1800
 HEALTH_BAR_STEPS = 20
 HEALTH_BAR_DISPLAY_SIZE = (260, 28)
 PLAYER_ATTACK_DAMAGE = 6
-PLAYER_ATTACK_RANGE = 40
+PLAYER_ATTACK_RANGE = 45
 PLAYER_SWORD_SWING_DURATION_MS = 220
 PLAYER_SWORD_SWING_ARC_DEGREES = 120
 PLAYER_ATTACK_KNOCKBACK_SPEED = 12
@@ -35,6 +37,9 @@ SPIDER_MAX_HEALTH = 16
 SPIDER_ATTACK_DAMAGE = 1
 SPIDER_ATTACK_RANGE = 4
 SPIDER_ATTACK_COOLDOWN_MS = 1000
+SPIDER_ATTACK_KNOCKBACK_SPEED = 3.2
+PLAYER_MASS = 2.0
+SPIDER_MASS = 1.0
 HEART_DROP_CHANCE = 0.25
 HEART_PICKUP_HEAL = 1
 HEART_PICKUP_SIZE = (24, 24)
@@ -51,9 +56,11 @@ death_fade_surface = pygame.Surface((WIDTH, HEIGHT))
 death_fade_surface.fill("black")
 pygame.display.set_caption("Dungi")
 
-SPIDER_IMAGE = pygame.image.load("Dungi/Spider.png")
+SPIDER_IMAGE = pygame.image.load(
+    str(ASSET_DIRECTORY / "spider.png")
+).convert_alpha()
 HEART_IMAGE = pygame.image.load(
-    str(Path(__file__).resolve().parent / "heart.png")
+    str(ASSET_DIRECTORY / "heart.png")
 ).convert_alpha()
 HEART_IMAGE = pygame.transform.scale(HEART_IMAGE, HEART_PICKUP_SIZE)
 
@@ -82,10 +89,12 @@ pygame.draw.circle(
 
 player_rect = pygame.Rect(WIDTH // 2, HEIGHT // 2, 24, 40)
 player_rect.center = GAME_MAP.start_position
-PLAYER_IMAGE = pygame.image.load("Dungi/Player.png").convert_alpha()
+PLAYER_IMAGE = pygame.image.load(
+    str(ASSET_DIRECTORY / "player.png")
+).convert_alpha()
 PLAYER_IMAGE = pygame.transform.smoothscale(PLAYER_IMAGE, (player_rect.width, player_rect.height))
 health_bar_source = pygame.image.load(
-    str(Path(__file__).resolve().parent / "health_bar.png")
+    str(ASSET_DIRECTORY / "health_bar.png")
 ).convert_alpha()
 health_bar_states = []
 for filled_steps in range(HEALTH_BAR_STEPS + 1):
@@ -107,7 +116,7 @@ for filled_steps in range(HEALTH_BAR_STEPS + 1):
         pygame.transform.scale(state, HEALTH_BAR_DISPLAY_SIZE)
     )
 stamina_bar_source = pygame.image.load(
-    str(Path(__file__).resolve().parent / "stamina_bar.png")
+    str(ASSET_DIRECTORY / "stamina_bar.png")
 ).convert_alpha()
 stamina_bar_states = []
 for filled_steps in range(HEALTH_BAR_STEPS + 1):
@@ -133,6 +142,7 @@ for filled_steps in range(HEALTH_BAR_STEPS + 1):
         pygame.transform.scale(state, HEALTH_BAR_DISPLAY_SIZE)
     )
 player_health = PLAYER_MAX_HEALTH
+player_knockback_velocity = pygame.Vector2()
 death_started_at = None
 player_stamina = PLAYER_MAX_STAMINA
 player_facing = pygame.Vector2(1, 0)
@@ -306,7 +316,7 @@ for _ in range(AMOUNT_OF_SPIDERS):
 
 
 def movement(delta_seconds):
-    global player_facing
+    global player_facing, player_knockback_velocity
     keys = pygame.key.get_pressed()
     horizontal_input = (
         int(keys[pygame.K_d] or keys[pygame.K_RIGHT])
@@ -332,15 +342,41 @@ def movement(delta_seconds):
         vertical_input * speed
     )
 
+    world_blockers = GAME_MAP.wall_rects + (
+        [GAME_MAP.exit_rect] if MOBS else []
+    )
+    previous_position = player_rect.topleft
+    move_without_collision(
+        player_rect,
+        round(player_knockback_velocity.x),
+        round(player_knockback_velocity.y),
+        world_blockers,
+    )
+    if player_rect.x == previous_position[0]:
+        player_knockback_velocity.x = 0
+    if player_rect.y == previous_position[1]:
+        player_knockback_velocity.y = 0
+    player_knockback_velocity *= KNOCKBACK_FRICTION
+    if player_knockback_velocity.length_squared() <= 0.25:
+        player_knockback_velocity = pygame.Vector2()
+
     move_without_collision(
         player_rect,
         horizontal,
         vertical,
-        [spider["rect"] for spider in MOBS]
-        + GAME_MAP.wall_rects
-        + ([GAME_MAP.exit_rect] if MOBS else []),
+        world_blockers,
     )
     player_rect.clamp_ip(screen.get_rect())
+    push_direction = pygame.Vector2(horizontal_input, vertical_input)
+    if push_direction.length_squared() > 0:
+        push_direction.normalize_ip()
+    for spider in MOBS:
+        if player_rect.colliderect(spider["rect"]):
+            separate_player_and_spider(
+                spider,
+                prefer_player_push=True,
+                push_direction=push_direction,
+            )
         
     if keys[pygame.K_ESCAPE]:
         pygame.quit()
@@ -383,6 +419,107 @@ def move_without_collision(rect, horizontal, vertical, blockers):
     rect.y += vertical
     if any(rect.colliderect(blocker) for blocker in blockers):
         rect.y -= vertical
+
+
+def can_place_actor(rect, other_actors):
+    return (
+        GAME_MAP.is_walkable(rect)
+        and not (MOBS and rect.colliderect(GAME_MAP.exit_rect))
+        and all(not rect.colliderect(other) for other in other_actors)
+    )
+
+
+def separate_player_and_spider(
+    spider,
+    prefer_player_push,
+    push_direction=None,
+):
+    spider_rect = spider["rect"]
+    if not player_rect.colliderect(spider_rect):
+        return
+
+    overlap_x = min(player_rect.right, spider_rect.right) - max(
+        player_rect.left,
+        spider_rect.left,
+    )
+    overlap_y = min(player_rect.bottom, spider_rect.bottom) - max(
+        player_rect.top,
+        spider_rect.top,
+    )
+    if (
+        prefer_player_push
+        and push_direction is not None
+        and abs(push_direction.y) > abs(push_direction.x)
+    ):
+        axis = "y"
+    elif (
+        prefer_player_push
+        and push_direction is not None
+        and abs(push_direction.x) > 0
+    ):
+        axis = "x"
+    else:
+        axis = "x" if overlap_x <= overlap_y else "y"
+
+    other_spider_rects = [other["rect"] for other in MOBS if other is not spider]
+    total_mass = PLAYER_MASS + SPIDER_MASS
+    player_share = SPIDER_MASS / total_mass
+    secondary_axis = "y" if axis == "x" else "x"
+
+    for push_axis in (axis, secondary_axis):
+        separation = (
+            (overlap_x if push_axis == "x" else overlap_y) + 1
+        )
+        player_separation = round(separation * player_share)
+        spider_separation = separation - player_separation
+        player_center = (
+            player_rect.centerx if push_axis == "x" else player_rect.centery
+        )
+        spider_center = (
+            spider_rect.centerx if push_axis == "x" else spider_rect.centery
+        )
+        direction = 1 if spider_center >= player_center else -1
+
+        player_candidate = player_rect.copy()
+        spider_candidate = spider_rect.copy()
+        if push_axis == "x":
+            player_candidate.x -= direction * player_separation
+            spider_candidate.x += direction * spider_separation
+        else:
+            player_candidate.y -= direction * player_separation
+            spider_candidate.y += direction * spider_separation
+
+        if (
+            can_place_actor(player_candidate, other_spider_rects)
+            and can_place_actor(spider_candidate, other_spider_rects)
+            and not player_candidate.colliderect(spider_candidate)
+        ):
+            player_rect.topleft = player_candidate.topleft
+            spider_rect.topleft = spider_candidate.topleft
+            return
+
+        # If a wall blocks one actor, let the other absorb the remaining overlap.
+        if can_place_actor(spider_candidate, other_spider_rects + [player_rect]):
+            spider_rect.topleft = spider_candidate.topleft
+            return
+        if can_place_actor(player_candidate, other_spider_rects + [spider_rect]):
+            player_rect.topleft = player_candidate.topleft
+            return
+
+        full_player_candidate = player_rect.copy()
+        full_spider_candidate = spider_rect.copy()
+        if push_axis == "x":
+            full_player_candidate.x -= direction * separation
+            full_spider_candidate.x += direction * separation
+        else:
+            full_player_candidate.y -= direction * separation
+            full_spider_candidate.y += direction * separation
+        if can_place_actor(full_player_candidate, other_spider_rects + [spider_rect]):
+            player_rect.topleft = full_player_candidate.topleft
+            return
+        if can_place_actor(full_spider_candidate, other_spider_rects + [player_rect]):
+            spider_rect.topleft = full_spider_candidate.topleft
+            return
 
 
 def spawning_spiders():
@@ -471,9 +608,9 @@ def find_spider_path(spider_rect, destination, other_spiders):
 
 def move_spider(spider, player_rect):
     spider_rect = spider["rect"]
-    blockers = [player_rect] + [
-        other_spider["rect"] for other_spider in MOBS if other_spider is not spider
-    ] + GAME_MAP.wall_rects
+    blockers = GAME_MAP.wall_rects + (
+        [GAME_MAP.exit_rect] if MOBS else []
+    )
 
     knockback_velocity = spider["knockback_velocity"]
     if knockback_velocity.length_squared() > 0.25:
@@ -486,6 +623,8 @@ def move_spider(spider, player_rect):
         knockback_velocity *= KNOCKBACK_FRICTION
         if knockback_velocity.length_squared() <= 0.25:
             spider["knockback_velocity"] = pygame.Vector2()
+        if spider_rect.colliderect(player_rect):
+            separate_player_and_spider(spider, prefer_player_push=False)
         return
 
     spider["knockback_velocity"] = pygame.Vector2()
@@ -527,6 +666,8 @@ def move_spider(spider, player_rect):
         spider["image"] = SPIDER_IMAGE
 
     move_without_collision(spider_rect, horizontal, vertical, blockers)
+    if spider_rect.colliderect(player_rect):
+        separate_player_and_spider(spider, prefer_player_push=False)
     if (
         not spider_can_see_player(spider_rect, player_rect)
         and pygame.Vector2(spider_rect.center).distance_to(target)
@@ -585,7 +726,7 @@ def player_attack_reaches_spider(spider):
 
 
 def attack_player_from_spiders(now):
-    global player_health
+    global player_health, player_knockback_velocity
 
     for spider in MOBS:
         if (
@@ -596,6 +737,19 @@ def attack_player_from_spiders(now):
         ):
             player_health = max(0, player_health - SPIDER_ATTACK_DAMAGE)
             spawn_damage_particles(player_rect.center, (255, 70, 70))
+            knockback = pygame.Vector2(
+                player_rect.centerx - spider["rect"].centerx,
+                player_rect.centery - spider["rect"].centery,
+            )
+            if knockback.length_squared() == 0:
+                knockback = pygame.Vector2(player_facing)
+            knockback.scale_to_length(SPIDER_ATTACK_KNOCKBACK_SPEED)
+            player_knockback_velocity = knockback
+            spider["knockback_velocity"] = (
+                pygame.Vector2(-knockback)
+                * PLAYER_MASS
+                / SPIDER_MASS
+            )
             spider["next_attack_time"] = now + SPIDER_ATTACK_COOLDOWN_MS
 
 

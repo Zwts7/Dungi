@@ -6,9 +6,8 @@ import pygame
 
 
 BORDER_COLOR = (102, 96, 123)
-TILE_FILES = {
-    "floor": "tile.png",
-}
+FLOOR_TILE_FILES = ("tile.png", "title_2.png")
+ASSET_DIRECTORY = Path(__file__).resolve().parent / "assets"
 WALL_COLORS = (
     (76, 70, 91),
     (84, 77, 100),
@@ -20,20 +19,25 @@ WALL_HIGHLIGHT = (119, 109, 137)
 class TileMap:
     def __init__(self, size, entry_position=None):
         width, height = size
-        tile_directory = Path(__file__).resolve().parent / "Tiles"
-        floor_path = tile_directory / TILE_FILES["floor"]
-        if not floor_path.is_file():
-            raise FileNotFoundError(
-                f"Missing floor tile: {floor_path}"
-            )
+        floor_paths = [
+            ASSET_DIRECTORY / filename
+            for filename in FLOOR_TILE_FILES
+        ]
+        for floor_path in floor_paths:
+            if not floor_path.is_file():
+                raise FileNotFoundError(f"Missing floor tile: {floor_path}")
 
-        self.tiles = {
-            name: pygame.image.load(
-                str(tile_directory / filename)
-            ).convert()
-            for name, filename in TILE_FILES.items()
-        }
-        tile_width, tile_height = self.tiles["floor"].get_size()
+        self.floor_tiles = [
+            pygame.image.load(str(floor_path)).convert()
+            for floor_path in floor_paths
+        ]
+        tile_width, tile_height = self.floor_tiles[0].get_size()
+        if any(
+            tile.get_size() != (tile_width, tile_height)
+            for tile in self.floor_tiles
+        ):
+            raise ValueError("All floor tile images must have the same dimensions")
+        self.floor_tile = random.choice(self.floor_tiles)
 
         self.columns = width // tile_width
         self.rows = height // tile_height
@@ -351,7 +355,7 @@ class TileMap:
             )
         for column, row in self.floor_cells:
             self.surface.blit(
-                self.tiles["floor"],
+                self.floor_tile,
                 (column * tile_width, row * tile_height),
             )
 
