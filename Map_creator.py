@@ -18,7 +18,7 @@ WALL_HIGHLIGHT = (119, 109, 137)
 
 
 class TileMap:
-    def __init__(self, size):
+    def __init__(self, size, entry_position=None):
         width, height = size
         tile_directory = Path(__file__).resolve().parent / "Tiles"
         floor_path = tile_directory / TILE_FILES["floor"]
@@ -43,6 +43,45 @@ class TileMap:
         self.tile_size = (tile_width, tile_height)
         self.floor_cells = set()
         self._generate_caves()
+        if entry_position is None:
+            start_edge, start_offset = self._random_edge_position()
+        else:
+            start_edge, start_offset = None, None
+        self.start_edge = start_edge
+        self.start_offset = start_offset
+        self.exit_edge, self.exit_offset = self._random_edge_position()
+        if start_edge is not None and start_offset is not None:
+            self.start_cell = self._edge_inner_cell(
+                start_edge,
+                start_offset,
+            )
+        else:
+            self.start_cell = (
+                max(0, min(self.columns - 1, entry_position[0] // tile_width)),
+                max(0, min(self.rows - 1, entry_position[1] // tile_height)),
+            )
+        self.exit_cell = self._edge_inner_cell(
+            self.exit_edge,
+            self.exit_offset,
+        )
+        cave_cells = set(self.floor_cells)
+        if start_edge is not None and start_offset is not None:
+            self._carve_portal_passage(
+                self._edge_cell(start_edge, start_offset),
+                self.start_cell,
+                cave_cells,
+            )
+        else:
+            self._carve_portal_passage(
+                self.start_cell,
+                self.start_cell,
+                cave_cells,
+            )
+        self._carve_portal_passage(
+            self._edge_cell(self.exit_edge, self.exit_offset),
+            self.exit_cell,
+            cave_cells,
+        )
         self._build_surface(size)
 
         floor_columns = [column for column, _ in self.floor_cells]
@@ -53,6 +92,92 @@ class TileMap:
             (max(floor_columns) - min(floor_columns) + 1) * tile_width,
             (max(floor_rows) - min(floor_rows) + 1) * tile_height,
         )
+        self.start_position = (
+            entry_position
+            if entry_position is not None
+            else (
+                self.start_cell[0] * tile_width + tile_width // 2,
+                self.start_cell[1] * tile_height + tile_height // 2,
+            )
+        )
+        self.entrance_spawn_exclusion_rect = pygame.Rect(
+            0,
+            0,
+            tile_width * 5,
+            tile_height * 5,
+        )
+        self.entrance_spawn_exclusion_rect.center = self.start_position
+        self.exit_rect = pygame.Rect(
+            self.exit_cell[0] * tile_width,
+            self.exit_cell[1] * tile_height,
+            tile_width,
+            tile_height,
+        )
+
+    def _random_edge_position(self):
+        edge = random.choice(("left", "right", "top", "bottom"))
+        if edge in ("left", "right"):
+            offset = random.randint(1, self.rows - 2)
+        else:
+            offset = random.randint(1, self.columns - 2)
+        return edge, offset
+
+    def _edge_inner_cell(self, edge, offset):
+        if edge == "left":
+            return 2, offset
+        if edge == "right":
+            return self.columns - 3, offset
+        if edge == "top":
+            return offset, 2
+        return offset, self.rows - 3
+
+    def _edge_cell(self, edge, offset):
+        if edge == "left":
+            return 0, offset
+        if edge == "right":
+            return self.columns - 1, offset
+        if edge == "top":
+            return offset, 0
+        return offset, self.rows - 1
+
+    def _carve_portal_passage(self, edge_cell, portal_cell, cave_cells):
+        column, row = edge_cell
+        portal_column, portal_row = portal_cell
+        destination = min(
+            cave_cells,
+            key=lambda cell: (
+                abs(cell[0] - portal_column) + abs(cell[1] - portal_row),
+                random.random(),
+            ),
+        )
+        destination_column, destination_row = destination
+
+        def carve_around(center_column, center_row):
+            for carve_row in range(center_row - 1, center_row + 2):
+                for carve_column in range(center_column - 1, center_column + 2):
+                    if (
+                        0 <= carve_column < self.columns
+                        and 0 <= carve_row < self.rows
+                    ):
+                        self.floor_cells.add((carve_column, carve_row))
+
+        carve_around(column, row)
+        while (column, row) != (portal_column, portal_row):
+            if column != portal_column:
+                column += 1 if column < portal_column else -1
+            else:
+                row += 1 if row < portal_row else -1
+            carve_around(column, row)
+
+        while (column, row) != (destination_column, destination_row):
+            move_horizontally = column != destination_column and (
+                row == destination_row or random.choice((True, False))
+            )
+            if move_horizontally:
+                column += 1 if column < destination_column else -1
+            else:
+                row += 1 if row < destination_row else -1
+            carve_around(column, row)
 
     def _carve_chamber(self, center_x, center_y, radius_x, radius_y):
         for row in range(
@@ -214,6 +339,11 @@ class TileMap:
         tile_width, tile_height = self.tile_size
 
         for column, row in wall_cells:
+            if not (
+                0 <= column < self.columns
+                and 0 <= row < self.rows
+            ):
+                continue
             position = (column * tile_width, row * tile_height)
             self._draw_wall_tile(column, row, tile_width, tile_height)
             self.wall_rects.append(
@@ -225,8 +355,83 @@ class TileMap:
                 (column * tile_width, row * tile_height),
             )
 
-    def draw(self, surface):
+    def draw(self, surface, exit_locked=True):
         surface.blit(self.surface, (0, 0))
+        pygame.draw.circle(
+            surface,
+            (80, 220, 120),
+            self.start_position,
+            min(self.tile_size) // 3,
+            3,
+        )
+        pygame.draw.circle(
+            surface,
+            (220, 70, 70) if exit_locked else (90, 220, 120),
+            self.exit_rect.center,
+            min(self.tile_size) // 2,
+            4,
+        )
+        if exit_locked:
+            gate_color = (175, 180, 195)
+            pygame.draw.line(
+                surface,
+                gate_color,
+                (self.exit_rect.left + 4, self.exit_rect.top + 4),
+                (self.exit_rect.left + 4, self.exit_rect.bottom - 4),
+                3,
+            )
+            pygame.draw.line(
+                surface,
+                gate_color,
+                (self.exit_rect.centerx, self.exit_rect.top + 4),
+                (self.exit_rect.centerx, self.exit_rect.bottom - 4),
+                3,
+            )
+            pygame.draw.line(
+                surface,
+                gate_color,
+                (self.exit_rect.right - 4, self.exit_rect.top + 4),
+                (self.exit_rect.right - 4, self.exit_rect.bottom - 4),
+                3,
+            )
+        if self.start_edge is not None:
+            self._draw_entrance_gate(surface)
+
+    def _draw_entrance_gate(self, surface):
+        if self.start_edge is None or self.start_offset is None:
+            return
+
+        tile_width, tile_height = self.tile_size
+        center = (
+            self.start_offset * tile_height + tile_height // 2
+            if self.start_edge in ("left", "right")
+            else self.start_offset * tile_width + tile_width // 2
+        )
+        color = (145, 150, 165)
+        if self.start_edge in ("left", "right"):
+            x = 3 if self.start_edge == "left" else surface.get_width() - 4
+            for offset in (-tile_height, 0, tile_height):
+                y = center + offset
+                pygame.draw.line(surface, color, (x - 5, y), (x + 5, y), 3)
+            pygame.draw.line(
+                surface,
+                color,
+                (x, center - tile_height * 1.5),
+                (x, center + tile_height * 1.5),
+                2,
+            )
+        else:
+            y = 3 if self.start_edge == "top" else surface.get_height() - 4
+            for offset in (-tile_width, 0, tile_width):
+                x = center + offset
+                pygame.draw.line(surface, color, (x, y - 5), (x, y + 5), 3)
+            pygame.draw.line(
+                surface,
+                color,
+                (center - tile_width * 1.5, y),
+                (center + tile_width * 1.5, y),
+                2,
+            )
 
     def is_walkable(self, rect):
         if (
@@ -251,5 +456,5 @@ class TileMap:
         )
 
 
-def create_map(size):
-    return TileMap(size)
+def create_map(size, entry_position=None):
+    return TileMap(size, entry_position)

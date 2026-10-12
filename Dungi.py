@@ -1,6 +1,7 @@
 import pygame
 import random
 import math
+from pathlib import Path
 from collections import deque
 from Map_creator import create_map
 
@@ -9,7 +10,7 @@ pygame.init()
 info = pygame.display.Info()
 WIDTH, HEIGHT = info.current_w, info.current_h
 FPS = 60
-DEBUG = True  # remember to set DEBUG to False before final submission
+DEBUG = False  # remember to set DEBUG to False before final submission
 PLAYER_SPEED = 3
 PLAYER_SPRINT_SPEED = 5
 PLAYER_MAX_STAMINA = 100
@@ -19,6 +20,10 @@ PLAYER_ATTACK_STAMINA_COST = 20
 PLAYER_WALK_STAMINA_REGEN = 15
 PLAYER_IDLE_STAMINA_REGEN = 30
 PLAYER_MAX_HEALTH = 20
+PLAYER_DEATH_FALL_MS = 700
+PLAYER_DEATH_FADE_MS = 1800
+HEALTH_BAR_STEPS = 20
+HEALTH_BAR_DISPLAY_SIZE = (260, 28)
 PLAYER_ATTACK_DAMAGE = 6
 PLAYER_ATTACK_RANGE = 40
 PLAYER_SWORD_SWING_DURATION_MS = 220
@@ -30,18 +35,30 @@ SPIDER_MAX_HEALTH = 16
 SPIDER_ATTACK_DAMAGE = 1
 SPIDER_ATTACK_RANGE = 4
 SPIDER_ATTACK_COOLDOWN_MS = 1000
+HEART_DROP_CHANCE = 0.25
+HEART_PICKUP_HEAL = 1
+HEART_PICKUP_SIZE = (24, 24)
+HEART_POP_DURATION_MS = 550
 DAMAGE_PARTICLE_COUNT = 8
 DAMAGE_PARTICLE_LIFETIME = 0.35
 AMOUNT_OF_SPIDERS = random.randint(5, 10)
 MOBS = []
 PARTICLES = []
-
-SPIDER_IMAGE = pygame.image.load("Dungi/Spider.png")
+HEART_DROPS = []
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
+death_fade_surface = pygame.Surface((WIDTH, HEIGHT))
+death_fade_surface.fill("black")
 pygame.display.set_caption("Dungi")
 
+SPIDER_IMAGE = pygame.image.load("Dungi/Spider.png")
+HEART_IMAGE = pygame.image.load(
+    str(Path(__file__).resolve().parent / "heart.png")
+).convert_alpha()
+HEART_IMAGE = pygame.transform.scale(HEART_IMAGE, HEART_PICKUP_SIZE)
+
 GAME_MAP = create_map((WIDTH, HEIGHT))
+level_number = 1
 
 clock = pygame.time.Clock()
 font = pygame.font.Font(None, 28)
@@ -64,9 +81,59 @@ pygame.draw.circle(
 )
 
 player_rect = pygame.Rect(WIDTH // 2, HEIGHT // 2, 24, 40)
+player_rect.center = GAME_MAP.start_position
 PLAYER_IMAGE = pygame.image.load("Dungi/Player.png").convert_alpha()
 PLAYER_IMAGE = pygame.transform.smoothscale(PLAYER_IMAGE, (player_rect.width, player_rect.height))
+health_bar_source = pygame.image.load(
+    str(Path(__file__).resolve().parent / "health_bar.png")
+).convert_alpha()
+health_bar_states = []
+for filled_steps in range(HEALTH_BAR_STEPS + 1):
+    state = health_bar_source.copy()
+    filled_width = round((health_bar_source.get_width() - 6) * filled_steps / HEALTH_BAR_STEPS)
+    empty_left = 3 + filled_width
+    if empty_left < health_bar_source.get_width() - 3:
+        pygame.draw.rect(
+            state,
+            (54, 38, 51),
+            pygame.Rect(
+                empty_left,
+                2,
+                health_bar_source.get_width() - 3 - empty_left,
+                health_bar_source.get_height() - 4,
+            ),
+        )
+    health_bar_states.append(
+        pygame.transform.scale(state, HEALTH_BAR_DISPLAY_SIZE)
+    )
+stamina_bar_source = pygame.image.load(
+    str(Path(__file__).resolve().parent / "stamina_bar.png")
+).convert_alpha()
+stamina_bar_states = []
+for filled_steps in range(HEALTH_BAR_STEPS + 1):
+    state = stamina_bar_source.copy()
+    filled_width = round(
+        (stamina_bar_source.get_width() - 6)
+        * filled_steps
+        / HEALTH_BAR_STEPS
+    )
+    empty_left = 3 + filled_width
+    if empty_left < stamina_bar_source.get_width() - 3:
+        pygame.draw.rect(
+            state,
+            (54, 38, 51),
+            pygame.Rect(
+                empty_left,
+                2,
+                stamina_bar_source.get_width() - 3 - empty_left,
+                stamina_bar_source.get_height() - 4,
+            ),
+        )
+    stamina_bar_states.append(
+        pygame.transform.scale(state, HEALTH_BAR_DISPLAY_SIZE)
+    )
 player_health = PLAYER_MAX_HEALTH
+death_started_at = None
 player_stamina = PLAYER_MAX_STAMINA
 player_facing = pygame.Vector2(1, 0)
 last_sword_swing = -PLAYER_SWORD_SWING_DURATION_MS
@@ -114,6 +181,62 @@ def draw_damage_particles():
         )
 
 
+def spawn_heart_drop(position, now):
+    if random.random() < HEART_DROP_CHANCE:
+        HEART_DROPS.append({
+            "position": pygame.Vector2(position),
+            "spawn_time": now,
+        })
+
+
+def update_heart_drops(now):
+    global player_health
+
+    for drop in HEART_DROPS[:]:
+        elapsed = now - drop["spawn_time"]
+        if (
+            elapsed >= HEART_POP_DURATION_MS
+            and player_health > 0
+            and player_health < PLAYER_MAX_HEALTH
+        ):
+            pickup_rect = pygame.Rect((0, 0), HEART_PICKUP_SIZE)
+            pickup_rect.center = drop["position"]
+            if player_rect.colliderect(pickup_rect):
+                player_health = min(
+                    PLAYER_MAX_HEALTH,
+                    player_health + HEART_PICKUP_HEAL,
+                )
+                HEART_DROPS.remove(drop)
+
+
+def draw_heart_drops(now):
+    for drop in HEART_DROPS:
+        elapsed = now - drop["spawn_time"]
+        if elapsed < HEART_POP_DURATION_MS:
+            progress = max(0, elapsed / HEART_POP_DURATION_MS)
+            bounce_height = 48 * 4 * progress * (1 - progress)
+            rotation = math.sin(progress * math.tau) * 20 * (1 - progress)
+            heart = pygame.transform.rotate(HEART_IMAGE, rotation)
+            position = (
+                round(drop["position"].x),
+                round(drop["position"].y - bounce_height),
+            )
+        else:
+            pulse = math.sin(elapsed / 260)
+            scale = 1 + 0.1 * pulse
+            heart = pygame.transform.rotozoom(
+                HEART_IMAGE,
+                math.sin(elapsed / 380) * 8,
+                scale,
+            )
+            position = (
+                round(drop["position"].x),
+                round(drop["position"].y - 3 - 3 * pulse),
+            )
+
+        screen.blit(heart, heart.get_rect(center=position))
+
+
 def spawn_spider():
     for _ in range(1000):
         spider_rect = pygame.Rect(
@@ -130,6 +253,9 @@ def spawn_spider():
         )
         if (
             GAME_MAP.is_walkable(spider_rect)
+            and not spider_rect.colliderect(
+                GAME_MAP.entrance_spawn_exclusion_rect
+            )
             and not spider_rect.colliderect(player_rect)
             and all(
                 not spider_rect.colliderect(spider["rect"])
@@ -152,6 +278,26 @@ def spawn_spider():
         "is_chasing": False,
         "last_known_player_position": None,
     })
+
+
+def advance_to_next_level():
+    global GAME_MAP, AMOUNT_OF_SPIDERS, level_number
+    global last_player_attack, last_sword_swing
+
+    level_number += 1
+    GAME_MAP = create_map(
+        (WIDTH, HEIGHT),
+        entry_position=GAME_MAP.exit_rect.center,
+    )
+    player_rect.center = GAME_MAP.start_position
+    MOBS.clear()
+    PARTICLES.clear()
+    HEART_DROPS.clear()
+    AMOUNT_OF_SPIDERS = random.randint(5, 10)
+    last_player_attack = pygame.time.get_ticks() - PLAYER_ATTACK_COOLDOWN_MS
+    last_sword_swing = -PLAYER_SWORD_SWING_DURATION_MS
+    for _ in range(AMOUNT_OF_SPIDERS):
+        spawn_spider()
 
 
 for _ in range(AMOUNT_OF_SPIDERS):
@@ -190,8 +336,11 @@ def movement(delta_seconds):
         player_rect,
         horizontal,
         vertical,
-        [spider["rect"] for spider in MOBS] + GAME_MAP.wall_rects,
+        [spider["rect"] for spider in MOBS]
+        + GAME_MAP.wall_rects
+        + ([GAME_MAP.exit_rect] if MOBS else []),
     )
+    player_rect.clamp_ip(screen.get_rect())
         
     if keys[pygame.K_ESCAPE]:
         pygame.quit()
@@ -413,6 +562,8 @@ def attack_nearby_spider(now):
         spider["health"] -= PLAYER_ATTACK_DAMAGE
         spider["knockback_velocity"] = knockback
         spawn_damage_particles(spider_rect.center, (255, 210, 70))
+        if spider["health"] <= 0:
+            spawn_heart_drop(spider_rect.center, pygame.time.get_ticks())
     player_stamina -= PLAYER_ATTACK_STAMINA_COST
     last_player_attack = now
 
@@ -550,14 +701,21 @@ while running:
     now = pygame.time.get_ticks()
     if player_health > 0:
         is_moving, is_sprinting = movement(delta_seconds)
+        if not MOBS and player_rect.colliderect(GAME_MAP.exit_rect):
+            advance_to_next_level()
         update_stamina(delta_seconds, is_moving, is_sprinting, now)
         spawning_spiders()
         attack_player_from_spiders(now)
         MOBS = [spider for spider in MOBS if spider["health"] > 0]
 
-    update_damage_particles(delta_seconds)
+    if player_health <= 0 and death_started_at is None:
+        death_started_at = now
 
-    GAME_MAP.draw(screen)
+    update_damage_particles(delta_seconds)
+    update_heart_drops(now)
+
+    GAME_MAP.draw(screen, exit_locked=bool(MOBS))
+    draw_heart_drops(now)
 
     if DEBUG:
         screen.blit(
@@ -575,27 +733,29 @@ while running:
                 1,
             )
         
-    screen.blit(PLAYER_IMAGE, player_rect)
-    draw_sword_swing(pygame.time.get_ticks())
+    if player_health > 0:
+        screen.blit(PLAYER_IMAGE, player_rect)
+        draw_sword_swing(now)
+    elif death_started_at is not None:
+        death_elapsed = now - death_started_at
+        fall_progress = min(1, death_elapsed / PLAYER_DEATH_FALL_MS)
+        fall_image = pygame.transform.rotate(PLAYER_IMAGE, -90 * fall_progress)
+        screen.blit(fall_image, fall_image.get_rect(center=player_rect.center))
     if DEBUG:
         pygame.draw.rect(screen, (80, 255, 255), player_rect, 1)
 
-    health_text = font.render(
-        f"Health: {player_health}/{PLAYER_MAX_HEALTH}", True, "white"
+    health_stage = round(
+        HEALTH_BAR_STEPS * player_health / PLAYER_MAX_HEALTH
     )
-    screen.blit(health_text, (10, 10))
-    stamina_label = font.render("Stamina", True, "white")
-    screen.blit(stamina_label, (10, 38))
-    stamina_bar = pygame.Rect(10, 65, 200, 12)
-    pygame.draw.rect(screen, "darkgray", stamina_bar)
-    stamina_bar.width = math.ceil(
-        200 * player_stamina / PLAYER_MAX_STAMINA
+    health_stage = max(0, min(HEALTH_BAR_STEPS, health_stage))
+    screen.blit(health_bar_states[health_stage], (8, 5))
+    level_text = font.render(f"Level: {level_number}", True, "white")
+    screen.blit(level_text, (WIDTH - level_text.get_width() - 10, 10))
+    stamina_stage = round(
+        HEALTH_BAR_STEPS * player_stamina / PLAYER_MAX_STAMINA
     )
-    pygame.draw.rect(screen, "cyan", stamina_bar)
-    stamina_text = font.render(
-        f"{math.ceil(player_stamina)}/{PLAYER_MAX_STAMINA}", True, "white"
-    )
-    screen.blit(stamina_text, (220, 58))
+    stamina_stage = max(0, min(HEALTH_BAR_STEPS, stamina_stage))
+    screen.blit(stamina_bar_states[stamina_stage], (8, 38))
     
     for spider in MOBS:
         screen.blit(spider["image"], spider["rect"])
@@ -608,8 +768,20 @@ while running:
 
     draw_damage_particles()
 
-    if player_health == 0:
-        screen.fill("black")
+    if death_started_at is not None:
+        fade_elapsed = max(0, now - death_started_at - PLAYER_DEATH_FALL_MS)
+        fade_alpha = min(
+            255,
+            round(255 * fade_elapsed / PLAYER_DEATH_FADE_MS),
+        )
+        death_fade_surface.set_alpha(fade_alpha)
+        screen.blit(death_fade_surface, (0, 0))
+
+    if (
+        death_started_at is not None
+        and now - death_started_at
+        >= PLAYER_DEATH_FALL_MS + PLAYER_DEATH_FADE_MS
+    ):
         game_over_text = font.render("GAME OVER", True, "red")
         screen.blit(game_over_text, game_over_text.get_rect(center=screen.get_rect().center))
 
